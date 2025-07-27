@@ -84,7 +84,7 @@ func performMapTask(mapf func(string, string) []KeyValue, task *RequestTaskReply
 		}
 		tempfile.Close()
 		finalFile := fmt.Sprintf("mr-%d-%d", task.TaskId, bucket)
-		err = os.Rename(tempfile.Name(), filename)
+		err = os.Rename(tempfile.Name(), finalFile)
 		if err != nil {
 			log.Fatalf("cannot rename tempfile: %v", err)
 		}
@@ -106,7 +106,11 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 		//got a task, then perform the task based on task type.
 		if assignedTask.TaskType == MapPhase {
-			generatedFile := performMapTask(mapf, assignedTask, workerID)
+			done := performMapTask(mapf, assignedTask, workerID)
+			if !done {
+				time.Sleep(200 * time.Millisecond)
+
+			}
 		}
 	}
 
