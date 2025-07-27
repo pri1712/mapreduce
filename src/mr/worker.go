@@ -1,9 +1,17 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
+import (
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"log"
+	"net/rpc"
+	"os"
+	"sync/atomic"
+	"time"
+)
+
+var workerCounter int32
 
 // Map functions return a slice of KeyValue.
 type KeyValue struct {
@@ -19,14 +27,88 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+func generateWorkerID() int32 {
+	return atomic.AddInt32(&workerCounter, 1)
+}
+
+func requestTask(workerID int32) *RequestTaskReply {
+	request := RequestTaskArgs{WorkerID: workerID}
+	reply := RequestTaskReply{}
+	assignedTask := call("Coordinator.RequestMapTask", &request, &reply)
+	if !assignedTask {
+		log.Fatalf("Assign Error")
+	}
+	if !reply.IsTaskValid {
+		log.Printf("No task assigned to worker %d", workerID)
+		return nil
+	}
+	return &reply
+}
+
+func performMapTask(mapf func(string, string) []KeyValue, task *RequestTaskReply, workerID int32) bool {
+	filename := task.MapFile
+	//read the file and perform map on them.
+	contents, err := os.ReadFile(filename)
+	if err != nil {
+		log.Fatalf("cannot read %v: %v", filename, err)
+	}
+	mapResults := mapf(filename, string(contents)) //array of values
+	print(mapResults)
+	//var newFile string
+	//for _, KeyValue := range mapResults {
+	//	key := KeyValue.Key
+	//	value := KeyValue.Value
+	//	reduceNumber := ihash(key) % task.nReduce
+	//	newFile = "mr-"
+	//}
+
+	partitionedMatrix := make([][]KeyValue, task.nReduce)
+
+	for _, keyvalue := range mapResults {
+		partition := ihash(keyvalue.Key) % task.nReduce
+		partitionedMatrix[partition] = append(partitionedMatrix[partition], keyvalue) //writing all same kv pairs to one partition
+	}
+
+	//now gotta write it to a file in json format.
+	for bucket := 0; bucket < task.nReduce; bucket++ {
+		tempfile, err := os.CreateTemp("", fmt.Sprintf("mr-%d-%d-", task.TaskId, bucket))
+		if err != nil {
+			log.Fatalf("cannot create tempfile: %v", err)
+		}
+		encoder := json.NewEncoder(tempfile)
+		for _, keyvalue := range partitionedMatrix[bucket] {
+			err := encoder.Encode(&keyvalue)
+			if err != nil {
+				log.Fatalf("cannot encode %v: %v", keyvalue.Key, err)
+			}
+		}
+		tempfile.Close()
+		finalFile := fmt.Sprintf("mr-%d-%d", task.TaskId, bucket)
+		err = os.Rename(tempfile.Name(), filename)
+		if err != nil {
+			log.Fatalf("cannot rename tempfile: %v", err)
+		}
+	}
+	return true
+}
+
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-
-	// Your worker implementation here.
-
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	workerID := generateWorkerID()
+	//call the coordinator to request for task.
+	for {
+		assignedTask := requestTask(workerID)
+		if assignedTask == nil {
+			//wait for sometime and again do the same request.
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		//got a task, then perform the task based on task type.
+		if assignedTask.TaskType == MapPhase {
+			generatedFile := performMapTask(mapf, assignedTask, workerID)
+		}
+	}
 
 }
 

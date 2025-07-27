@@ -13,6 +13,8 @@ import "net/http"
 type TaskPhase int
 type TaskStatus int
 
+const InvalidWorkerID = -1
+const WaitTime = 10
 const (
 	MapPhase TaskPhase = iota
 	ReducePhase
@@ -50,7 +52,7 @@ type Coordinator struct {
 }
 
 type RequestTaskArgs struct {
-	WorkerID int
+	WorkerID int32
 }
 
 type RequestTaskReply struct {
@@ -59,7 +61,8 @@ type RequestTaskReply struct {
 	MapFile     string
 	ReduceFiles []string //input to reduce tasks are a bunch of files, to be precise 1 per mapper
 	ReduceId    int
-	Dummy       bool //to check if valid data is sent or not.
+	IsTaskValid bool //to check if valid data is sent or not.
+	nReduce     int
 }
 
 type MapTaskCompletionArgs struct {
@@ -88,17 +91,18 @@ func (c *Coordinator) RequestMapTask(args *RequestTaskArgs, reply *RequestTaskRe
 	case NextTaskId := <-c.TaskQueue:
 		task := c.MapTasks[NextTaskId]
 		if task.TaskStatus != Idle {
-			reply.Dummy = false //to show that its an invalid task.
+			reply.IsTaskValid = false //to show that its an invalid task.
 			return nil
 		}
-		c.UpdateTaskState(args.WorkerID, task) //updates internal state of the task.
+		c.UpdateTaskState(int(args.WorkerID), task) //updates internal state of the task.
 		//send using rpc now to the worker with workerid given in args.
 		reply.TaskId = task.TaskId
 		reply.TaskType = task.TaskType
 		reply.MapFile = task.file
-		reply.Dummy = true
+		reply.IsTaskValid = true
+		reply.nReduce = c.nReduce
 	default:
-		reply.Dummy = false
+		reply.IsTaskValid = false
 	}
 	return nil
 }
@@ -121,10 +125,21 @@ func (c *Coordinator) ReportMapTaskCompletion(args *MapTaskCompletionArgs, reply
 		c.MapTasksCompleted++
 		if checkMapCompletion(c.MapTasksCompleted, len(c.files)) {
 			//finish the map phase, update the phase to reduce phase.
-
+			c.updatePhase()
 		}
 	}
 	return nil
+}
+
+func (c *Coordinator) updatePhase() {
+	if c.phase == MapPhase {
+		c.phase = ReducePhase
+		return
+	}
+	if c.phase == ReducePhase {
+		c.phase = DonePhase
+		return
+	}
 }
 
 func checkMapCompletion(completed int, total int) bool {
@@ -138,7 +153,7 @@ func CheckDeadWorkers(info map[int]*TaskInfo) []int {
 	//find all deadworkers.
 	var deadWorkers []int
 	for _, maptask := range info {
-		if maptask.TaskStatus == InProgress && time.Since(maptask.StartTime).Seconds() > 10 {
+		if maptask.TaskStatus == InProgress && time.Since(maptask.StartTime).Seconds() > WaitTime {
 			deadWorkers = append(deadWorkers, maptask.workerID)
 		}
 	}
@@ -151,7 +166,7 @@ func (c *Coordinator) HandleDeadWorkers(deadWorkers []int) {
 		for taskID, task := range c.MapTasks {
 			if task.workerID == workerID && task.TaskStatus == InProgress {
 				task.TaskStatus = Idle
-				task.workerID = -1
+				task.workerID = InvalidWorkerID
 				c.TaskQueue <- taskID
 			}
 		}
