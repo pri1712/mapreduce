@@ -7,7 +7,7 @@ package main
 // go build -buildmode=plugin mtiming.go
 //
 
-import "6.5840/mr"
+import "mapreduce/mr"
 import "strings"
 import "fmt"
 import "os"

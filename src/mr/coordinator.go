@@ -42,7 +42,7 @@ type Coordinator struct {
 	mutex             sync.Mutex
 	files             []string
 	nMap              int
-	nReduce           int
+	NReduce           int
 	done              bool
 	phase             TaskPhase
 	TaskQueue         chan int //denoted by the taskid.
@@ -62,11 +62,11 @@ type RequestTaskReply struct {
 	ReduceFiles []string //input to reduce tasks are a bunch of files, to be precise 1 per mapper
 	ReduceId    int
 	IsTaskValid bool //to check if valid data is sent or not.
-	nReduce     int
+	NReduce     int
 }
 
 type MapTaskCompletionArgs struct {
-	WorkerID int
+	WorkerID int32
 	TaskId   int
 }
 
@@ -75,8 +75,6 @@ type TaskCompletionReply struct {
 }
 
 func (c *Coordinator) UpdateTaskState(workerID int, info *TaskInfo) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
 
 	info.workerID = workerID
 	info.TaskStatus = InProgress
@@ -89,18 +87,22 @@ func (c *Coordinator) RequestMapTask(args *RequestTaskArgs, reply *RequestTaskRe
 	defer c.mutex.Unlock()
 	select {
 	case NextTaskId := <-c.TaskQueue:
+		log.Printf("RequestMapTask nextTaskId: %v", NextTaskId)
 		task := c.MapTasks[NextTaskId]
 		if task.TaskStatus != Idle {
 			reply.IsTaskValid = false //to show that its an invalid task.
+			log.Printf("RequestMapTask task status is %v", task.TaskStatus)
 			return nil
 		}
+		log.Println("updating task state now")
 		c.UpdateTaskState(int(args.WorkerID), task) //updates internal state of the task.
 		//send using rpc now to the worker with workerid given in args.
+		log.Println("Sending data now")
 		reply.TaskId = task.TaskId
 		reply.TaskType = task.TaskType
 		reply.MapFile = task.file
 		reply.IsTaskValid = true
-		reply.nReduce = c.nReduce
+		reply.NReduce = c.NReduce
 	default:
 		reply.IsTaskValid = false
 	}
@@ -119,7 +121,7 @@ func (c *Coordinator) ReportMapTaskCompletion(args *MapTaskCompletionArgs, reply
 	}
 	if task.TaskStatus != Completed {
 		task.TaskStatus = Completed
-		log.Print("Report MapTaskCompletion completed")
+		//log.Print("Report MapTaskCompletion completed")
 		log.Print("Time taken: ", time.Now().Sub(task.StartTime))
 		reply.Recorded = true
 		c.MapTasksCompleted++
@@ -127,6 +129,8 @@ func (c *Coordinator) ReportMapTaskCompletion(args *MapTaskCompletionArgs, reply
 			//finish the map phase, update the phase to reduce phase.
 			c.updatePhase()
 		}
+	} else {
+		reply.Recorded = false
 	}
 	return nil
 }
@@ -204,17 +208,20 @@ func (c *Coordinator) Done() bool {
 	return ret
 }
 
-// nReduce is the number of reduce tasks to use.
+// NReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
-	c.nReduce = nReduce
+	c.NReduce = nReduce
 	c.files = files
 	c.nMap = len(files) //number of map tasks.
 	c.done = false
 	c.phase = MapPhase
 	c.MapTasks = make(map[int]*TaskInfo, len(files))
+	c.TaskQueue = make(chan int, len(files))
+	//fmt.Println("Init coordinator")
 	for i, file := range files {
 		t := TaskInfo{}
+		//log.Println("File: ", file)
 		t.file = file
 		t.TaskId = i
 		t.TaskType = MapPhase

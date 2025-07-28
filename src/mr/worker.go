@@ -36,7 +36,9 @@ func requestTask(workerID int32) *RequestTaskReply {
 	reply := RequestTaskReply{}
 	assignedTask := call("Coordinator.RequestMapTask", &request, &reply)
 	if !assignedTask {
-		log.Fatalf("Assign Error")
+		log.Printf("RPC failed in requestTask. Retrying...")
+		time.Sleep(500 * time.Millisecond)
+		return nil
 	}
 	if !reply.IsTaskValid {
 		log.Printf("No task assigned to worker %d", workerID)
@@ -45,7 +47,7 @@ func requestTask(workerID int32) *RequestTaskReply {
 	return &reply
 }
 
-func performMapTask(mapf func(string, string) []KeyValue, task *RequestTaskReply, workerID int32) bool {
+func performMapTask(mapf func(string, string) []KeyValue, task *RequestTaskReply, workerID int32) error {
 	filename := task.MapFile
 	//read the file and perform map on them.
 	contents, err := os.ReadFile(filename)
@@ -53,24 +55,24 @@ func performMapTask(mapf func(string, string) []KeyValue, task *RequestTaskReply
 		log.Fatalf("cannot read %v: %v", filename, err)
 	}
 	mapResults := mapf(filename, string(contents)) //array of values
-	print(mapResults)
+	//log.Printf("Map results: %v", mapResults)
 	//var newFile string
 	//for _, KeyValue := range mapResults {
 	//	key := KeyValue.Key
 	//	value := KeyValue.Value
-	//	reduceNumber := ihash(key) % task.nReduce
+	//	reduceNumber := ihash(key) % task.NReduce
 	//	newFile = "mr-"
 	//}
 
-	partitionedMatrix := make([][]KeyValue, task.nReduce)
+	partitionedMatrix := make([][]KeyValue, task.NReduce)
 
 	for _, keyvalue := range mapResults {
-		partition := ihash(keyvalue.Key) % task.nReduce
+		partition := ihash(keyvalue.Key) % task.NReduce
 		partitionedMatrix[partition] = append(partitionedMatrix[partition], keyvalue) //writing all same kv pairs to one partition
 	}
 
 	//now gotta write it to a file in json format.
-	for bucket := 0; bucket < task.nReduce; bucket++ {
+	for bucket := 0; bucket < task.NReduce; bucket++ {
 		tempfile, err := os.CreateTemp("", fmt.Sprintf("mr-%d-%d-", task.TaskId, bucket))
 		if err != nil {
 			log.Fatalf("cannot create tempfile: %v", err)
@@ -89,27 +91,47 @@ func performMapTask(mapf func(string, string) []KeyValue, task *RequestTaskReply
 			log.Fatalf("cannot rename tempfile: %v", err)
 		}
 	}
-	return true
+	return nil
+}
+
+func informCoordinator(workerID int32, completedTask *RequestTaskReply) TaskCompletionReply {
+	args := MapTaskCompletionArgs{TaskId: completedTask.TaskId, WorkerID: workerID}
+	reply := TaskCompletionReply{}
+	call("Coordinator.ReportMapTaskCompletion", &args, &reply)
+	return reply
 }
 
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 	workerID := generateWorkerID()
-	//call the coordinator to request for task.
+	//log.Printf("Worker ID: %d", workerID)
 	for {
+		//fmt.Println("Here")
 		assignedTask := requestTask(workerID)
+		//fmt.Printf("Assigned Task: %v", assignedTask)
 		if assignedTask == nil {
 			//wait for sometime and again do the same request.
 			time.Sleep(200 * time.Millisecond)
+			//log.Printf("Waiting for assigned task")
 			continue
 		}
+
 		//got a task, then perform the task based on task type.
 		if assignedTask.TaskType == MapPhase {
-			done := performMapTask(mapf, assignedTask, workerID)
-			if !done {
-				time.Sleep(200 * time.Millisecond)
-
+			//log.Printf("Assigned task: %v", assignedTask.TaskId)
+			err := performMapTask(mapf, assignedTask, workerID)
+			if err != nil {
+				//log.Printf("cannot perform map task: %v", err)
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			//tell coordinator that job successfully done.
+			jobReport := informCoordinator(workerID, assignedTask)
+			if jobReport.Recorded {
+				log.Printf("Job successfully completed")
+			} else {
+				log.Printf("Issue in job reporting path")
 			}
 		}
 	}
