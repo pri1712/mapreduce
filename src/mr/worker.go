@@ -34,7 +34,7 @@ func generateWorkerID() int32 {
 func requestTask(workerID int32) *RequestTaskReply {
 	request := RequestTaskArgs{WorkerID: workerID}
 	reply := RequestTaskReply{}
-	assignedTask := call("Coordinator.RequestMapTask", &request, &reply)
+	assignedTask := call("Coordinator.RequestTask", &request, &reply)
 	if !assignedTask {
 		log.Printf("RPC failed in requestTask. Retrying...")
 		time.Sleep(500 * time.Millisecond)
@@ -56,13 +56,6 @@ func performMapTask(mapf func(string, string) []KeyValue, task *RequestTaskReply
 	}
 	mapResults := mapf(filename, string(contents)) //array of values
 	//log.Printf("Map results: %v", mapResults)
-	//var newFile string
-	//for _, KeyValue := range mapResults {
-	//	key := KeyValue.Key
-	//	value := KeyValue.Value
-	//	reduceNumber := ihash(key) % task.NReduce
-	//	newFile = "mr-"
-	//}
 
 	partitionedMatrix := make([][]KeyValue, task.NReduce)
 

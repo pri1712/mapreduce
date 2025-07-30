@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -45,7 +46,7 @@ type Coordinator struct {
 	NReduce           int
 	done              bool
 	phase             TaskPhase
-	TaskQueue         chan int //denoted by the taskid.
+	TaskQueue         chan int //channel of taskid.
 	MapTasks          map[int]*TaskInfo
 	ReduceTasks       map[int]*TaskInfo
 	MapTasksCompleted int
@@ -82,37 +83,69 @@ func (c *Coordinator) UpdateTaskState(workerID int, info *TaskInfo) {
 	return
 }
 
-func (c *Coordinator) RequestMapTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
+func (c *Coordinator) collectReduceFiles(workerID int32) []string {
+	//return all intermediate files of the form mr-*-workerid
+	var files []string
+	for i := 0; i < len(c.files); i++ {
+		filename := fmt.Sprintf("mr-%d-%d", i, workerID)
+		files = append(files, filename)
+	}
+	return files
+}
+func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	select {
 	case NextTaskId := <-c.TaskQueue:
-		log.Printf("RequestMapTask nextTaskId: %v", NextTaskId)
+		log.Printf("RequestTask nextTaskId: %v", NextTaskId)
 		task := c.MapTasks[NextTaskId]
 		if task.TaskStatus != Idle {
 			reply.IsTaskValid = false //to show that its an invalid task.
-			log.Printf("RequestMapTask task status is %v", task.TaskStatus)
+			log.Printf("RequestTask task status is %v", task.TaskStatus)
 			return nil
 		}
-		log.Println("updating task state now")
-		c.UpdateTaskState(int(args.WorkerID), task) //updates internal state of the task.
-		//send using rpc now to the worker with workerid given in args.
-		log.Println("Sending data now")
-		reply.TaskId = task.TaskId
-		reply.TaskType = task.TaskType
-		reply.MapFile = task.file
-		reply.IsTaskValid = true
-		reply.NReduce = c.NReduce
+		if task.TaskType == MapPhase {
+			log.Println("working on map task now")
+			c.UpdateTaskState(int(args.WorkerID), task) //updates internal state of the task.
+			//send using rpc now to the worker with workerid given in args.
+			log.Println("Sending data now")
+			reply.TaskId = task.TaskId
+			reply.TaskType = task.TaskType
+			reply.MapFile = task.file
+			reply.IsTaskValid = true
+			reply.NReduce = c.NReduce
+		} else if task.TaskType == ReducePhase {
+			log.Println("working on reduce task now")
+			//give the worker all the files of the type mr-*-reduceid.
+			reduceFiles := c.collectReduceFiles(args.WorkerID)
+			reply.ReduceFiles = reduceFiles
+		}
 	default:
 		reply.IsTaskValid = false
 	}
 	return nil
 }
 
+func (c *Coordinator) emptyChannelUnsafe() {
+	//assuming that the mutex.lock in the reportmaptask method is still held when this function is called
+	for {
+		select {
+		case <-c.TaskQueue:
+
+		default:
+			goto refill
+		}
+	}
+
+refill:
+	for i := 0; i < c.NReduce; i++ {
+		c.TaskQueue <- i
+	}
+}
+
 func (c *Coordinator) ReportMapTaskCompletion(args *MapTaskCompletionArgs, reply *TaskCompletionReply) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-
 	task, exists := c.MapTasks[args.TaskId]
 	if !exists {
 		log.Printf("Invalid TaskId %d reported by worker %d", args.TaskId, args.WorkerID)
@@ -128,6 +161,7 @@ func (c *Coordinator) ReportMapTaskCompletion(args *MapTaskCompletionArgs, reply
 		if checkMapCompletion(c.MapTasksCompleted, len(c.files)) {
 			//finish the map phase, update the phase to reduce phase.
 			c.updatePhase()
+			c.emptyChannelUnsafe()
 		}
 	} else {
 		reply.Recorded = false
@@ -138,11 +172,9 @@ func (c *Coordinator) ReportMapTaskCompletion(args *MapTaskCompletionArgs, reply
 func (c *Coordinator) updatePhase() {
 	if c.phase == MapPhase {
 		c.phase = ReducePhase
-		return
-	}
-	if c.phase == ReducePhase {
+
+	} else if c.phase == ReducePhase {
 		c.phase = DonePhase
-		return
 	}
 }
 
@@ -156,9 +188,9 @@ func checkMapCompletion(completed int, total int) bool {
 func CheckDeadWorkers(info map[int]*TaskInfo) []int {
 	//find all deadworkers.
 	var deadWorkers []int
-	for _, maptask := range info {
-		if maptask.TaskStatus == InProgress && time.Since(maptask.StartTime).Seconds() > WaitTime {
-			deadWorkers = append(deadWorkers, maptask.workerID)
+	for _, task := range info {
+		if task.TaskStatus == InProgress && time.Since(task.StartTime).Seconds() > WaitTime {
+			deadWorkers = append(deadWorkers, task.workerID)
 		}
 	}
 	return deadWorkers
@@ -217,7 +249,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.done = false
 	c.phase = MapPhase
 	c.MapTasks = make(map[int]*TaskInfo, len(files))
-	c.TaskQueue = make(chan int, len(files))
+	c.TaskQueue = make(chan int)
 	//fmt.Println("Init coordinator")
 	for i, file := range files {
 		t := TaskInfo{}
