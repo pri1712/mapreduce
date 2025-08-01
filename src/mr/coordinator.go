@@ -40,16 +40,17 @@ type TaskInfo struct {
 }
 
 type Coordinator struct {
-	mutex             sync.Mutex
-	files             []string
-	nMap              int
-	NReduce           int
-	done              bool
-	phase             TaskPhase
-	TaskQueue         chan int //channel of taskid.
-	MapTasks          map[int]*TaskInfo
-	ReduceTasks       map[int]*TaskInfo
-	MapTasksCompleted int
+	mutex                sync.Mutex
+	files                []string
+	nMap                 int
+	NReduce              int
+	done                 bool
+	phase                TaskPhase
+	TaskQueue            chan int //channel of taskid.
+	MapTasks             map[int]*TaskInfo
+	ReduceTasks          map[int]*TaskInfo
+	MapTasksCompleted    int
+	ReduceTasksCompleted int
 }
 
 type RequestTaskArgs struct {
@@ -66,9 +67,10 @@ type RequestTaskReply struct {
 	NReduce     int
 }
 
-type MapTaskCompletionArgs struct {
-	WorkerID int32
+type TaskCompletionArgs struct {
 	TaskId   int
+	TaskType TaskPhase
+	WorkerID int32
 }
 
 type TaskCompletionReply struct {
@@ -134,38 +136,65 @@ func (c *Coordinator) emptyChannelUnsafe() {
 		case <-c.TaskQueue:
 
 		default:
-			goto refill
+			return
 		}
 	}
+}
 
-refill:
+func (c *Coordinator) fillReduceTaskMap() {
 	for i := 0; i < c.NReduce; i++ {
+		//fill the reduce task map over here.
+		t := TaskInfo{}
+		t.TaskId = i
+		t.TaskType = ReducePhase
+		t.TaskStatus = Idle
+		t.StartTime = time.Time{}
+		c.ReduceTasks[i] = &t
 		c.TaskQueue <- i
 	}
 }
 
-func (c *Coordinator) ReportMapTaskCompletion(args *MapTaskCompletionArgs, reply *TaskCompletionReply) error {
+func (c *Coordinator) ReportMapTaskCompletion(args *TaskCompletionArgs, reply *TaskCompletionReply) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	task, exists := c.MapTasks[args.TaskId]
-	if !exists {
-		log.Printf("Invalid TaskId %d reported by worker %d", args.TaskId, args.WorkerID)
-		reply.Recorded = false
-		return nil
-	}
-	if task.TaskStatus != Completed {
-		task.TaskStatus = Completed
-		//log.Print("Report MapTaskCompletion completed")
-		log.Print("Time taken: ", time.Now().Sub(task.StartTime))
-		reply.Recorded = true
-		c.MapTasksCompleted++
-		if checkMapCompletion(c.MapTasksCompleted, len(c.files)) {
-			//finish the map phase, update the phase to reduce phase.
-			c.updatePhase()
-			c.emptyChannelUnsafe()
+	if args.TaskType == MapPhase {
+		task, exists := c.MapTasks[args.TaskId]
+		if !exists {
+			log.Printf("Invalid TaskId %d reported by worker %d", args.TaskId, args.WorkerID)
+			reply.Recorded = false
+			return nil
 		}
-	} else {
-		reply.Recorded = false
+		if task.TaskStatus != Completed {
+			task.TaskStatus = Completed
+			//log.Print("Report MapTaskCompletion completed")
+			log.Print("Time taken: ", time.Now().Sub(task.StartTime))
+			reply.Recorded = true
+			c.MapTasksCompleted++
+			if checkTaskCompletion(c.MapTasksCompleted, len(c.files)) {
+				//finish the map phase, update the phase to reduce phase.
+				c.updatePhase()
+				c.emptyChannelUnsafe()
+				c.fillReduceTaskMap()
+			}
+		} else {
+			reply.Recorded = false
+		}
+	} else if args.TaskType == ReducePhase {
+		task, exists := c.ReduceTasks[args.TaskId]
+		if !exists {
+			log.Printf("Invalid TaskId %d reported by worker %d", args.TaskId, args.WorkerID)
+			reply.Recorded = false
+			return nil
+		}
+		if task.TaskStatus != Completed {
+			task.TaskStatus = Completed
+			log.Print("Time taken: ", time.Now().Sub(task.StartTime))
+			reply.Recorded = true
+			c.ReduceTasksCompleted++
+			if checkTaskCompletion(c.ReduceTasksCompleted, c.NReduce) {
+				c.updatePhase()
+			}
+		}
 	}
 	return nil
 }
@@ -179,7 +208,7 @@ func (c *Coordinator) updatePhase() {
 	}
 }
 
-func checkMapCompletion(completed int, total int) bool {
+func checkTaskCompletion(completed int, total int) bool {
 	if completed == total {
 		return true
 	}

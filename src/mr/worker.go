@@ -136,7 +136,7 @@ func performMapTask(mapf func(string, string) []KeyValue, task *RequestTaskReply
 }
 
 func informCoordinator(workerID int32, completedTask *RequestTaskReply) TaskCompletionReply {
-	args := MapTaskCompletionArgs{TaskId: completedTask.TaskId, WorkerID: workerID}
+	args := TaskCompletionArgs{completedTask.TaskId, completedTask.TaskType, workerID}
 	reply := TaskCompletionReply{}
 	call("Coordinator.ReportMapTaskCompletion", &args, &reply)
 	return reply
