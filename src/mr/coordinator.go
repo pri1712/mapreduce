@@ -83,15 +83,16 @@ func (c *Coordinator) UpdateTaskState(workerID int, info *TaskInfo) {
 	return
 }
 
-func (c *Coordinator) collectReduceFiles(workerID int32) []string {
+func (c *Coordinator) collectReduceFiles(taskid int) []string {
 	//return all intermediate files of the form mr-*-workerid
 	var files []string
 	for i := 0; i < len(c.files); i++ {
-		filename := fmt.Sprintf("mr-%d-%d", i, workerID)
+		filename := fmt.Sprintf("mr-%d-%d", i, taskid)
 		files = append(files, filename)
 	}
 	return files
 }
+
 func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -117,7 +118,7 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 		} else if task.TaskType == ReducePhase {
 			log.Println("working on reduce task now")
 			//give the worker all the files of the type mr-*-reduceid.
-			reduceFiles := c.collectReduceFiles(args.WorkerID)
+			reduceFiles := c.collectReduceFiles(task.TaskId)
 			reply.ReduceFiles = reduceFiles
 		}
 	default:
@@ -249,7 +250,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.done = false
 	c.phase = MapPhase
 	c.MapTasks = make(map[int]*TaskInfo, len(files))
-	c.TaskQueue = make(chan int)
+	c.TaskQueue = make(chan int, len(files)) //buffered channel.
 	//fmt.Println("Init coordinator")
 	for i, file := range files {
 		t := TaskInfo{}

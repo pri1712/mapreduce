@@ -47,12 +47,58 @@ func requestTask(workerID int32) *RequestTaskReply {
 	return &reply
 }
 
+func performReduceTask(reducef func(string, []string) string, task *RequestTaskReply, workerID int32) error {
+	files := task.ReduceFiles
+	log.Printf("Found %d files", len(files)) //there should be m files where m is the number of map tasks.
+	//iterate through the files,decode from json to string based,
+	var keyValues []KeyValue
+	for _, file := range files {
+		log.Printf("Processing file %s", file)
+		file, err := os.Open(file)
+		if err != nil {
+			log.Printf("cannot open file %v: %v", file, err)
+			continue
+		}
+		jsonDecoder := json.NewDecoder(file)
+		for {
+			var keyValue KeyValue
+			err := jsonDecoder.Decode(&keyValue)
+			if err != nil {
+				log.Printf("cannot decode file %v: %v", file, err)
+				break
+			}
+			keyValues = append(keyValues, keyValue)
+		}
+		err = file.Close()
+		if err != nil {
+			log.Printf("cannot close file %v: %v", file, err)
+			return err
+		}
+	}
+	groupedKeys := make(map[string][]string)
+	for _, keyValue := range keyValues {
+		groupedKeys[keyValue.Key] = append(groupedKeys[keyValue.Key], keyValue.Value)
+	}
+	outputFile, _ := os.Create(fmt.Sprintf("mr-out-%d", task.TaskId))
+	for key, values := range groupedKeys {
+		finalOutput := reducef(key, values)
+		fmt.Fprintf(outputFile, "%v %v\n", key, finalOutput)
+	}
+	err := outputFile.Close()
+	if err != nil {
+		log.Printf("cannot close file %v: %v", outputFile, err)
+		return err
+	}
+	return nil
+}
+
 func performMapTask(mapf func(string, string) []KeyValue, task *RequestTaskReply, workerID int32) error {
 	filename := task.MapFile
 	//read the file and perform map on them.
 	contents, err := os.ReadFile(filename)
 	if err != nil {
 		log.Fatalf("cannot read %v: %v", filename, err)
+		return err
 	}
 	mapResults := mapf(filename, string(contents)) //array of values
 	//log.Printf("Map results: %v", mapResults)
@@ -68,13 +114,15 @@ func performMapTask(mapf func(string, string) []KeyValue, task *RequestTaskReply
 	for bucket := 0; bucket < task.NReduce; bucket++ {
 		tempfile, err := os.CreateTemp("", fmt.Sprintf("mr-%d-%d-", task.TaskId, bucket))
 		if err != nil {
-			log.Fatalf("cannot create tempfile: %v", err)
+			log.Printf("cannot create tempfile: %v", err)
+			return err
 		}
 		encoder := json.NewEncoder(tempfile)
 		for _, keyvalue := range partitionedMatrix[bucket] {
 			err := encoder.Encode(&keyvalue)
 			if err != nil {
-				log.Fatalf("cannot encode %v: %v", keyvalue.Key, err)
+				log.Printf("cannot encode %v: %v", keyvalue.Key, err)
+				return err
 			}
 		}
 		tempfile.Close()
@@ -126,6 +174,23 @@ func Worker(mapf func(string, string) []KeyValue,
 			} else {
 				log.Printf("Issue in job reporting path")
 			}
+		} else if assignedTask.TaskType == ReducePhase {
+			//perform work on the reduce task
+			err := performReduceTask(reducef, assignedTask, workerID)
+			if err != nil {
+				//there is an error in perform reduce task method.
+				log.Printf("cannot perform reduce task: %v", err)
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			jobReport := informCoordinator(workerID, assignedTask)
+			if jobReport.Recorded {
+				log.Printf("Job successfully completed")
+			} else {
+				log.Printf("Issue in job reporting path")
+			}
+
 		}
 	}
 
