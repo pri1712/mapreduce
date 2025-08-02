@@ -36,29 +36,23 @@ func requestTask(workerID int32) *RequestTaskReply {
 	reply := RequestTaskReply{}
 	assignedTask := call("Coordinator.RequestTask", &request, &reply)
 	if !assignedTask {
-		log.Printf("RPC failed in requestTask. Retrying...")
 		time.Sleep(500 * time.Millisecond)
 		return nil
 	}
 	if !reply.IsTaskValid {
-		log.Printf("No task assigned to worker %d", workerID)
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(1000 * time.Millisecond)
 		return nil
 	}
-	//log.Printf("Do exit: %v ", reply.doExit)
 	return &reply
 }
 
 func performReduceTask(reducef func(string, []string) string, task *RequestTaskReply, workerID int32) error {
 	files := task.ReduceFiles
-	log.Printf("Found %d files", len(files)) //there should be m files where m is the number of map tasks.
 	//iterate through the files,decode from json to string based,
 	var keyValues []KeyValue
 	for _, file := range files {
-		log.Printf("Processing file %s", file)
 		file, err := os.Open(file)
 		if err != nil {
-			//log.Printf("cannot open file %s: %v", file.Name(), err)
 			log.Printf("Error opening file %s: %s", file.Name(), err)
 			continue
 		}
@@ -70,7 +64,6 @@ func performReduceTask(reducef func(string, []string) string, task *RequestTaskR
 				log.Printf("cannot decode file %s: %v", file.Name(), err)
 				break
 			}
-			//log.Printf("Found key %s with value %s", keyValue.Key, keyValue.Value)
 			keyValues = append(keyValues, keyValue)
 		}
 		err = file.Close()
@@ -105,7 +98,6 @@ func performMapTask(mapf func(string, string) []KeyValue, task *RequestTaskReply
 		return err
 	}
 	mapResults := mapf(filename, string(contents)) //array of values
-	//log.Printf("Map results: %v", mapResults)
 
 	partitionedMatrix := make([][]KeyValue, task.NReduce)
 
@@ -166,27 +158,16 @@ func Worker(mapf func(string, string) []KeyValue,
 				continue
 			}
 			//tell coordinator that job successfully done.
-			jobReport := informCoordinator(workerID, assignedTask)
-			if jobReport.Recorded {
-				log.Printf("Job successfully completed")
-			} else {
-				log.Printf("Issue in job reporting path")
-			}
+			informCoordinator(workerID, assignedTask)
 		} else if assignedTask.TaskType == ReducePhase {
 			//perform work on the reduce task
 			err := performReduceTask(reducef, assignedTask, workerID)
 			if err != nil {
 				//there is an error in perform reduce task method.
-				log.Printf("cannot perform reduce task: %v", err)
 				time.Sleep(30 * time.Second)
 				continue
 			}
-			jobReport := informCoordinator(workerID, assignedTask)
-			if jobReport.Recorded {
-				log.Printf("Job successfully completed")
-			} else {
-				log.Printf("Issue in job reporting path")
-			}
+			informCoordinator(workerID, assignedTask)
 		} else if assignedTask.TaskType == DonePhase {
 			log.Printf("Exiting the worker process %d", workerID)
 			os.Exit(0)
