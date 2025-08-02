@@ -138,6 +138,7 @@ func performMapTask(mapf func(string, string) []KeyValue, task *RequestTaskReply
 func informCoordinator(workerID int32, completedTask *RequestTaskReply) TaskCompletionReply {
 	args := TaskCompletionArgs{completedTask.TaskId, completedTask.TaskType, workerID}
 	reply := TaskCompletionReply{}
+	log.Printf("Informing Coordinator that %v has been completed", completedTask.TaskType)
 	call("Coordinator.ReportMapTaskCompletion", &args, &reply)
 	return reply
 }
