@@ -40,7 +40,8 @@ type TaskInfo struct {
 }
 
 type Coordinator struct {
-	mutex                sync.Mutex
+	mu                   sync.Mutex
+	rwmu                 sync.RWMutex
 	files                []string
 	nMap                 int
 	NReduce              int
@@ -51,6 +52,7 @@ type Coordinator struct {
 	ReduceTasks          map[int]*TaskInfo
 	MapTasksCompleted    int
 	ReduceTasksCompleted int
+	callDone             bool
 }
 
 type RequestTaskArgs struct {
@@ -65,6 +67,7 @@ type RequestTaskReply struct {
 	ReduceId    int
 	IsTaskValid bool //to check if valid data is sent or not.
 	NReduce     int
+	doExit      bool
 }
 
 type TaskCompletionArgs struct {
@@ -77,13 +80,12 @@ type TaskCompletionReply struct {
 	Recorded bool
 }
 
-func (c *Coordinator) UpdateTaskState(workerID int, info *TaskInfo) {
-
-	info.workerID = workerID
-	info.TaskStatus = InProgress
-	info.StartTime = time.Now()
-	return
-}
+//func (c *Coordinator) UpdateTaskState(workerID int, info *TaskInfo) {
+//	info.workerID = workerID
+//	info.TaskStatus = InProgress
+//	info.StartTime = time.Now()
+//	return
+//}
 
 func (c *Coordinator) collectReduceFiles(taskid int) []string {
 	//return all intermediate files of the form mr-*-workerid
@@ -96,7 +98,7 @@ func (c *Coordinator) collectReduceFiles(taskid int) []string {
 }
 
 func (c *Coordinator) emptyChannelUnsafe() {
-	//assuming that the mutex.lock in the reportmaptask method is still held when this function is called
+	//assuming that the mu.lock in the reportmaptask method is still held when this function is called
 	for {
 		select {
 		case <-c.TaskQueue:
@@ -120,6 +122,7 @@ func (c *Coordinator) fillReduceTaskMap() {
 		c.ReduceTasks[i] = &t
 		c.TaskQueue <- i
 	}
+	log.Println("fillReduceTaskMap completed")
 }
 
 func (c *Coordinator) updatePhase() {
@@ -151,57 +154,85 @@ func CheckDeadWorkers(info map[int]*TaskInfo) []int {
 func (c *Coordinator) HandleDeadWorkers(deadWorkers []int) {
 	//manage all the tasks which have the deadworker as the workerID.
 	for _, workerID := range deadWorkers {
-		for taskID, task := range c.MapTasks {
-			if task.workerID == workerID && task.TaskStatus == InProgress {
-				task.TaskStatus = Idle
-				task.workerID = InvalidWorkerID
-				c.TaskQueue <- taskID
+		if c.phase == MapPhase {
+			for taskID, task := range c.MapTasks {
+				if task.workerID == workerID && task.TaskStatus == InProgress {
+					task.TaskStatus = Idle
+					task.workerID = InvalidWorkerID
+					c.TaskQueue <- taskID
+				}
+			}
+		} else if c.phase == ReducePhase {
+			for taskID, task := range c.ReduceTasks {
+				if task.workerID == workerID && task.TaskStatus == InProgress {
+					task.TaskStatus = Idle
+					task.workerID = InvalidWorkerID
+					c.TaskQueue <- taskID
+				}
 			}
 		}
 	}
 }
 
 func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	c.mu.Lock()
 	select {
 	case NextTaskId := <-c.TaskQueue:
 		log.Printf("RequestTask nextTaskId: %v", NextTaskId)
-		task := c.MapTasks[NextTaskId]
-		if task.TaskStatus != Idle {
-			reply.IsTaskValid = false //to show that its an invalid task.
-			log.Printf("RequestTask task status is %v", task.TaskStatus)
-			return nil
-		}
-		if task.TaskType == MapPhase {
+		if c.phase == MapPhase {
+			task := c.MapTasks[NextTaskId]
+			if task.TaskStatus != Idle {
+				reply.IsTaskValid = false //to show that its an invalid task.
+				log.Printf("RequestTask task status is %v", task.TaskStatus)
+				return nil
+			}
 			log.Println("working on map task now")
-			c.UpdateTaskState(int(args.WorkerID), task) //updates internal state of the task.
+			//c.UpdateTaskState(int(args.WorkerID), task)
+			task.workerID = int(args.WorkerID) //updates internal state of the task.
+			task.StartTime = time.Now()
+			task.TaskStatus = InProgress
 			//send using rpc now to the worker with workerid given in args.
-			log.Println("Sending data now")
 			reply.TaskId = task.TaskId
 			reply.TaskType = task.TaskType
 			reply.MapFile = task.file
 			reply.IsTaskValid = true
 			reply.NReduce = c.NReduce
-		} else if task.TaskType == ReducePhase {
-			log.Println("working on reduce task now")
+		} else if c.phase == ReducePhase {
+			task := c.ReduceTasks[NextTaskId]
+			if task.TaskStatus != Idle {
+				reply.IsTaskValid = false //to show that its an invalid task.
+				log.Printf("RequestTask task status is %v", task.TaskStatus)
+				return nil
+			}
 			//give the worker all the files of the type mr-*-reduceid.
 			reduceFiles := c.collectReduceFiles(task.TaskId)
+			//c.UpdateTaskState(int(args.WorkerID), task)
+			task.workerID = int(args.WorkerID)
+			task.StartTime = time.Now()
+			task.TaskStatus = InProgress
 			reply.ReduceFiles = reduceFiles
 			reply.IsTaskValid = true
 			reply.NReduce = c.NReduce
 			reply.TaskId = task.TaskId
 			reply.TaskType = task.TaskType
+			reply.doExit = false
 		}
 	default:
-		reply.IsTaskValid = false
+		reply.doExit = true
+		reply.TaskType = DonePhase
+		reply.IsTaskValid = true
+		c.callDone = true
+	}
+	c.mu.Unlock()
+	if c.callDone {
+		c.Done()
 	}
 	return nil
 }
 
-func (c *Coordinator) ReportMapTaskCompletion(args *TaskCompletionArgs, reply *TaskCompletionReply) error {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
+func (c *Coordinator) ReportTaskCompletion(args *TaskCompletionArgs, reply *TaskCompletionReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if args.TaskType == MapPhase {
 		task, exists := c.MapTasks[args.TaskId]
 		if !exists {
@@ -223,6 +254,7 @@ func (c *Coordinator) ReportMapTaskCompletion(args *TaskCompletionArgs, reply *T
 				c.updatePhase()
 				c.emptyChannelUnsafe()
 				c.fillReduceTaskMap()
+				log.Printf("Finished updating task transition info")
 			}
 		} else {
 			reply.Recorded = false
@@ -240,7 +272,8 @@ func (c *Coordinator) ReportMapTaskCompletion(args *TaskCompletionArgs, reply *T
 			reply.Recorded = true
 			c.ReduceTasksCompleted++
 			if checkTaskCompletion(c.ReduceTasksCompleted, c.NReduce) {
-				c.updatePhase()
+				c.updatePhase() //go to done phase.
+				//c.workerExitHandler() //exit all the ongoing workers.
 			}
 		}
 	}
@@ -271,10 +304,28 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	ret := false
-
+	allDone := true
 	//check if the all the map and reduce tasks are done, then return true.
-
+	for _, task := range c.MapTasks {
+		if task.TaskStatus != Completed {
+			allDone = false
+			break
+		}
+	}
+	if allDone {
+		for _, task := range c.ReduceTasks {
+			if task.TaskStatus != Completed {
+				allDone = false
+				break
+			}
+		}
+	}
+	if allDone {
+		ret = true
+	}
 	return ret
 }
 
@@ -287,7 +338,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.done = false
 	c.phase = MapPhase
 	c.MapTasks = make(map[int]*TaskInfo, len(files))
-	c.TaskQueue = make(chan int, len(files)) //buffered channel.
+	c.TaskQueue = make(chan int, 100) //buffered channel.
 	//fmt.Println("Init coordinator")
 	for i, file := range files {
 		t := TaskInfo{}
@@ -303,7 +354,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	go func() {
 		for {
 			time.Sleep(2 * time.Second)
-			c.mutex.Lock()
+			c.mu.Lock()
 			if c.phase == MapPhase {
 				deadWorkers := CheckDeadWorkers(c.MapTasks)
 				c.HandleDeadWorkers(deadWorkers)
@@ -311,7 +362,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 				deadWorkers := CheckDeadWorkers(c.MapTasks)
 				c.HandleDeadWorkers(deadWorkers)
 			}
-			c.mutex.Unlock()
+			c.mu.Unlock()
 		}
 	}()
 	c.server()

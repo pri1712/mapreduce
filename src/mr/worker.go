@@ -42,8 +42,10 @@ func requestTask(workerID int32) *RequestTaskReply {
 	}
 	if !reply.IsTaskValid {
 		log.Printf("No task assigned to worker %d", workerID)
+		time.Sleep(500 * time.Millisecond)
 		return nil
 	}
+	log.Printf("Do exit: %v ", reply.doExit)
 	return &reply
 }
 
@@ -56,7 +58,8 @@ func performReduceTask(reducef func(string, []string) string, task *RequestTaskR
 		log.Printf("Processing file %s", file)
 		file, err := os.Open(file)
 		if err != nil {
-			log.Printf("cannot open file %v: %v", file, err)
+			//log.Printf("cannot open file %s: %v", file.Name(), err)
+			log.Printf("Error opening file %s: %s", file.Name(), err)
 			continue
 		}
 		jsonDecoder := json.NewDecoder(file)
@@ -64,9 +67,10 @@ func performReduceTask(reducef func(string, []string) string, task *RequestTaskR
 			var keyValue KeyValue
 			err := jsonDecoder.Decode(&keyValue)
 			if err != nil {
-				log.Printf("cannot decode file %v: %v", file, err)
+				log.Printf("cannot decode file %s: %v", file.Name(), err)
 				break
 			}
+			//log.Printf("Found key %s with value %s", keyValue.Key, keyValue.Value)
 			keyValues = append(keyValues, keyValue)
 		}
 		err = file.Close()
@@ -138,8 +142,7 @@ func performMapTask(mapf func(string, string) []KeyValue, task *RequestTaskReply
 func informCoordinator(workerID int32, completedTask *RequestTaskReply) TaskCompletionReply {
 	args := TaskCompletionArgs{completedTask.TaskId, completedTask.TaskType, workerID}
 	reply := TaskCompletionReply{}
-	log.Printf("Informing Coordinator that %v has been completed", completedTask.TaskType)
-	call("Coordinator.ReportMapTaskCompletion", &args, &reply)
+	call("Coordinator.ReportTaskCompletion", &args, &reply)
 	return reply
 }
 
@@ -147,24 +150,18 @@ func informCoordinator(workerID int32, completedTask *RequestTaskReply) TaskComp
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 	workerID := generateWorkerID()
-	//log.Printf("Worker ID: %d", workerID)
 	for {
 		//fmt.Println("Here")
 		assignedTask := requestTask(workerID)
-		//fmt.Printf("Assigned Task: %v", assignedTask)
 		if assignedTask == nil {
-			//wait for sometime and again do the same request.
 			time.Sleep(200 * time.Millisecond)
-			//log.Printf("Waiting for assigned task")
 			continue
 		}
 
 		//got a task, then perform the task based on task type.
 		if assignedTask.TaskType == MapPhase {
-			//log.Printf("Assigned task: %v", assignedTask.TaskId)
 			err := performMapTask(mapf, assignedTask, workerID)
 			if err != nil {
-				//log.Printf("cannot perform map task: %v", err)
 				time.Sleep(1 * time.Second)
 				continue
 			}
@@ -181,20 +178,20 @@ func Worker(mapf func(string, string) []KeyValue,
 			if err != nil {
 				//there is an error in perform reduce task method.
 				log.Printf("cannot perform reduce task: %v", err)
-				time.Sleep(1 * time.Second)
+				time.Sleep(30 * time.Second)
 				continue
 			}
-
 			jobReport := informCoordinator(workerID, assignedTask)
 			if jobReport.Recorded {
 				log.Printf("Job successfully completed")
 			} else {
 				log.Printf("Issue in job reporting path")
 			}
-
+		} else if assignedTask.TaskType == DonePhase {
+			log.Printf("Exiting the worker process %d", workerID)
+			os.Exit(0)
 		}
 	}
-
 }
 
 // example function to show how to make an RPC call to the coordinator.
