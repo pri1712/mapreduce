@@ -173,6 +173,22 @@ func (c *Coordinator) HandleDeadWorkers(deadWorkers []int) {
 	}
 }
 
+func (c *Coordinator) AllTasksCompleted() bool {
+	if c.phase == MapPhase {
+		for _, task := range c.MapTasks {
+			if task.TaskStatus != Completed {
+				return false
+			}
+		}
+	} else if c.phase == ReducePhase {
+		for _, task := range c.ReduceTasks {
+			if task.TaskStatus != Completed {
+				return false
+			}
+		}
+	}
+	return true
+}
 func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
 	c.mu.Lock()
 	var shouldCallDone bool
@@ -218,10 +234,12 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 			reply.doExit = false
 		}
 	default:
-		reply.doExit = true
-		reply.TaskType = DonePhase
-		reply.IsTaskValid = true
-		shouldCallDone = true
+		if c.AllTasksCompleted() {
+			reply.doExit = true
+			reply.TaskType = DonePhase
+			reply.IsTaskValid = true
+			shouldCallDone = true
+		}
 	}
 	c.mu.Unlock()
 	if shouldCallDone {

@@ -45,7 +45,7 @@ func requestTask(workerID int32) *RequestTaskReply {
 		time.Sleep(500 * time.Millisecond)
 		return nil
 	}
-	log.Printf("Do exit: %v ", reply.doExit)
+	//log.Printf("Do exit: %v ", reply.doExit)
 	return &reply
 }
 
