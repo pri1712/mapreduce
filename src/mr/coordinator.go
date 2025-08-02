@@ -52,7 +52,6 @@ type Coordinator struct {
 	ReduceTasks          map[int]*TaskInfo
 	MapTasksCompleted    int
 	ReduceTasksCompleted int
-	callDone             bool
 }
 
 type RequestTaskArgs struct {
@@ -176,6 +175,7 @@ func (c *Coordinator) HandleDeadWorkers(deadWorkers []int) {
 
 func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
 	c.mu.Lock()
+	var shouldCallDone bool
 	select {
 	case NextTaskId := <-c.TaskQueue:
 		log.Printf("RequestTask nextTaskId: %v", NextTaskId)
@@ -221,10 +221,10 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 		reply.doExit = true
 		reply.TaskType = DonePhase
 		reply.IsTaskValid = true
-		c.callDone = true
+		shouldCallDone = true
 	}
 	c.mu.Unlock()
-	if c.callDone {
+	if shouldCallDone {
 		c.Done()
 	}
 	return nil
